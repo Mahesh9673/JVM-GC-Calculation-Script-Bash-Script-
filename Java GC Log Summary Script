@@ -213,3 +213,35 @@ echo
 echo "=================================================="
 echo "                  SUMMARY END"
 echo "=================================================="
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+1. The important GC parameters to check
+Here is the order I recommend when troubleshooting a production WebLogic server.
+Priority	   Parameter	     Your result	What it tells you
+1	         Maximum heap (-Xmx)	4 GB	               Maximum Java heap available
+2	          Post-GC heap usage	110 MiB maximum observed	Approximate live heap after recorded GC pauses
+3	          Post-GC usage as % of -Xmx	2.7%	Low in this sample, but startup-only
+4	               Full GC count	1	Investigate why it happened; your log says System.gc()
+5	              Longest GC pause	30.366 ms	Short in this sample
+6	              GC frequency	9 Young GC pauses	Meaningful only with the time period and workload
+7	                 OOM / evacuation failures	0 detected	No matching errors in this log sample
+8	                Process RSS and container memory	Not in this report	Shows total process memory pressure beyond Java heap
