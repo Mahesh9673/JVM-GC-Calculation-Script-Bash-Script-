@@ -1,1 +1,0 @@
-# JVM-GC-Calculation-Script-Bash-Script-

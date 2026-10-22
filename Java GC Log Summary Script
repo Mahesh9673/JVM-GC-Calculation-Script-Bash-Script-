@@ -1,0 +1,215 @@
+# JVM-GC-Calculation-Script-Bash-Script-
+
+
+
+
+
+
+#!/bin/bash
+
+# Java GC Log Summary Script
+# Usage: ./gc_summary.sh /path/to/gc.log
+
+set -u
+
+if [ $# -ge 1 ]; then
+    GCLOG="$1"
+else
+    read -r -p "Enter GC log file path: " GCLOG
+fi
+
+if [ ! -f "$GCLOG" ] || [ ! -r "$GCLOG" ]; then
+    echo "ERROR: File does not exist or is not readable: $GCLOG"
+    exit 1
+fi
+
+if ! command -v gawk >/dev/null 2>&1; then
+    echo "ERROR: GNU awk (gawk) is required."
+    echo "On RHEL: sudo dnf install gawk"
+    exit 1
+fi
+
+echo
+echo "=================================================="
+echo "           JAVA GC LOG HEALTH SUMMARY"
+echo "=================================================="
+echo "Log file : $GCLOG"
+echo "File size: $(du -h "$GCLOG" | awk '{print $1}')"
+echo "Analyzed : $(date)"
+echo
+
+gawk '
+function mib(value, unit) {
+    if (unit == "K") return value / 1024
+    if (unit == "G") return value * 1024
+    return value
+}
+
+function fmt(value) {
+    return sprintf("%.2f MiB", value)
+}
+
+BEGIN {
+    young = full = remark = cleanup = other = 0
+    events = 0
+    totalPause = 0
+    maxPause = 0
+    maxBefore = 0
+    maxAfter = 0
+    totalReclaimed = 0
+    maxCapacity = 0
+    oom = 0
+    explicitGC = 0
+    evacuation = 0
+    toSpace = 0
+}
+
+# JVM memory and heap configuration
+/Memory:/ {
+    memory = $NF
+}
+/Heap Min Capacity:/ {
+    minHeap = $NF
+}
+/Heap Initial Capacity:/ {
+    initialHeap = $NF
+}
+/Heap Max Capacity:/ {
+    maxHeap = $NF
+    if (match(maxHeap, /^[0-9.]+[KMG]/)) {
+        value = substr(maxHeap, RSTART, RLENGTH)
+        unit = substr(value, length(value), 1)
+        number = substr(value, 1, length(value)-1)
+        maxCapacity = mib(number + 0, unit)
+    }
+}
+
+# Detect GC-related problems
+/System.gc\(\)/ {
+    explicitGC++
+}
+/OutOfMemoryError|Java heap space|GC overhead limit exceeded/ {
+    oom++
+}
+/Evacuation Failure|Evacuation Failed/ {
+    evacuation++
+}
+/To-space exhausted/ {
+    toSpace++
+}
+
+# Parse completed GC pause records with heap-before/after values
+/ Pause / {
+    if (match($0, /[0-9.]+[KMG]->[0-9.]+[KMG]\([0-9.]+[KMG]\)[[:space:]]+[0-9.]+ms/)) {
+        record = substr($0, RSTART, RLENGTH)
+
+        if (match(record, /([0-9.]+)([KMG])->([0-9.]+)([KMG])\(([0-9.]+)([KMG])\)[[:space:]]+([0-9.]+)ms/, a)) {
+            before = mib(a[1] + 0, a[2])
+            after = mib(a[3] + 0, a[4])
+            capacity = mib(a[5] + 0, a[6])
+            pause = a[7] + 0
+
+            events++
+            totalPause += pause
+
+            if (pause > maxPause) maxPause = pause
+            if (before > maxBefore) maxBefore = before
+            if (after > maxAfter) maxAfter = after
+
+            if (before > after) totalReclaimed += before - after
+
+            if ($0 ~ /Pause Young/) young++
+            else if ($0 ~ /Pause Full/) full++
+            else if ($0 ~ /Pause Remark/) remark++
+            else if ($0 ~ /Pause Cleanup/) cleanup++
+            else other++
+
+            if (pause >= 1000) slowPauses++
+        }
+    }
+}
+
+END {
+    print "--------------- JVM CONFIGURATION ---------------"
+    print "JVM memory reported : " (memory ? memory : "Not found")
+    print "Minimum heap        : " (minHeap ? minHeap : "Not found")
+    print "Initial heap        : " (initialHeap ? initialHeap : "Not found")
+    print "Maximum heap        : " (maxHeap ? maxHeap : "Not found")
+
+    print ""
+    print "---------------- GC EVENT COUNTS ----------------"
+    print "Young GC pauses     : " young
+    print "Full GC pauses      : " full
+    print "Remark pauses       : " remark
+    print "Cleanup pauses      : " cleanup
+    print "Other pause events  : " other
+    print "Total parsed pauses : " events
+
+    print ""
+    print "------------------ GC TIMINGS -------------------"
+    print "Total pause time    : " sprintf("%.3f seconds", totalPause / 1000)
+    print "Average pause time  : " (events ? sprintf("%.3f ms", totalPause / events) : "N/A")
+    print "Longest pause       : " sprintf("%.3f ms", maxPause)
+    print "Pauses >= 1 second  : " (slowPauses + 0)
+
+    print ""
+    print "---------------- HEAP CONSUMPTION ---------------"
+    print "Highest pre-GC heap : " fmt(maxBefore)
+    print "Highest post-GC heap: " fmt(maxAfter)
+    print "Positive reclamation: " fmt(totalReclaimed)
+
+    if (maxCapacity > 0) {
+        print "Maximum heap        : " fmt(maxCapacity)
+        print "Highest post-GC use : " sprintf("%.1f%% of max heap", maxAfter / maxCapacity * 100)
+    } else {
+        print "Maximum heap        : Not found in log"
+        print "Highest post-GC use : Cannot calculate"
+    }
+
+    print ""
+    print "------------------ ERROR CHECK ------------------"
+    print "System.gc() mentions: " explicitGC
+    print "OOM-related lines   : " oom
+    print "Evacuation failures : " evacuation
+    print "To-space exhausted  : " toSpace
+
+    print ""
+    print "---------------- HEALTH INDICATION --------------"
+
+    if (events == 0) {
+        print "WARNING: No completed GC pause records were parsed."
+        print "Check the log format and ensure the file contains GC events."
+    } else {
+        if (maxCapacity > 0 && maxAfter / maxCapacity >= 0.80)
+            print "WARNING: Highest observed post-GC heap is >= 80% of max heap."
+        else
+            print "INFO: No high post-GC heap warning from parsed pause records."
+
+        if (full > 0)
+            print "CHECK: Full GC found. Review its cause; System.gc() may trigger one."
+
+        if (slowPauses > 0)
+            print "WARNING: One or more GC pauses lasted at least 1 second."
+
+        if (oom > 0)
+            print "CRITICAL: OOM-related messages found in the log."
+
+        if (evacuation > 0 || toSpace > 0)
+            print "WARNING: G1 evacuation/to-space issue detected."
+
+        if (full == 0 && slowPauses == 0 && oom == 0 &&
+            evacuation == 0 && toSpace == 0 &&
+            (maxCapacity == 0 || maxAfter / maxCapacity < 0.80))
+            print "INFO: No major warning detected in the parsed GC records."
+    }
+
+    print ""
+    print "NOTE: This summary covers only the events recorded in this file."
+    print "Use representative peak-load logs before changing production heap."
+}
+' "$GCLOG"
+
+echo
+echo "=================================================="
+echo "                  SUMMARY END"
+echo "=================================================="
